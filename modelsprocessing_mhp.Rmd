@@ -1,0 +1,243 @@
+---
+title: "financial_eco_MHP"
+author: "Marc-Henri Pélet"
+date: "24/05/2020"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message=FALSE, fig.width=10, fig.height=5)
+options(width=120)
+library(lattice)
+library(ggplot2)
+library(plyr)
+library(randomForest)
+```
+
+Dataset : [http://groupware.les.inf.puc-rio.br/har](http://groupware.les.inf.puc-rio.br/har) 
+
+
+## Processing
+
+```{r}
+trainer.raw <- read.csv(url("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"))
+tester.raw <- read.csv(url("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"))
+```
+
+## Data processing : the beginning
+
+Look at the dimensions & head of the dataset to get an idea
+```{r}
+# Res 1
+dim(trainer.raw)
+# Res 2 - excluded because over the required amount
+# head(trainer.raw)
+# Res 3 - excluded because over the required amount
+#str(trainer.raw)
+# Res 4 - excluded because over the required amount
+#summary(trainer.raw)
+```
+
+
+We remove the empty data 
+
+```{r}
+maxNAPercentage = 20
+maxNACount <- nrow(trainer.raw) / 100 * maxNAPercentage
+removeColumns <- which(colSums(is.na(trainer.raw) | trainer.raw=="") > maxNACount)
+trainer.cleaned01 <- trainer.raw[,-removeColumns]
+tester.cleaned01 <- tester.raw[,-removeColumns]
+```
+
+As we do not need the related data, we take out these too
+
+```{r}
+removeColumns <- grep("timestamp", names(trainer.cleaned01))
+trainer.cleaned02 <- trainer.cleaned01[,-c(1, removeColumns )]
+tester.cleaned02 <- tester.cleaned01[,-c(1, removeColumns )]
+```
+
+
+```{r}
+classeLevels <- levels(trainer.cleaned02$classe)
+trainer.cleaned03 <- data.frame(data.matrix(trainer.cleaned02))
+trainer.cleaned03$classe <- factor(trainer.cleaned03$classe, labels=classeLevels)
+tester.cleaned03 <- data.frame(data.matrix(tester.cleaned02))
+```
+
+We have now the final datas
+
+```{r}
+trainer.cleaned <- trainer.cleaned03
+tester.cleaned <- tester.cleaned03
+```
+
+
+## Analysis
+
+
+```{r}
+set.seed(15691997)
+library(caret)
+clref <- which(names(trainer.cleaned) == "classe")
+partition <- createDataPartition(y=trainer.cleaned$classe, p=0.7, list=FALSE)
+trainer.subSetTrain <- trainer.cleaned[partition, ]
+trainer.subSetTest <- trainer.cleaned[-partition, ]
+```
+
+
+```{r}
+correlations <- cor(trainer.subSetTrain[, -clref], as.numeric(trainer.subSetTrain$classe))
+optimalcorr <- subset(as.data.frame(as.table(correlations)), abs(Freq)>0.3)
+optimalcorr
+```
+
+Normally, the best correlations are not above 0.3
+
+We now plot this in order to have a better visualisation
+
+```{r}
+library(Rmisc)
+library(ggplot2)
+p1 <- ggplot(trainer.subSetTrain, aes(classe,pitch_forearm)) + 
+  geom_boxplot(aes(fill=classe))
+p2 <- ggplot(trainer.subSetTrain, aes(classe, magnet_arm_x)) + 
+  geom_boxplot(aes(fill=classe))
+multiplot(p1,p2,cols=2)
+```
+
+
+## Models 
+
+Let's identify variables with high correlations amongst each other
+
+We will then check if these modifications make the model more accurate 
+
+```{r}
+library(corrplot)
+cormat <- cor(trainer.subSetTrain[, -clref])
+highcor <- findCorrelation(cormat, cutoff=0.9, exact=TRUE)
+excludeColumns <- c(highcor, clref)
+corrplot(cormat, method="color", type="lower", order="hclust", tl.cex=0.70, tl.col="red", tl.srt = 45, diag = FALSE)
+```
+
+Therefore, some data seem corrolated with each other. We should then exclude them in order to have a better hindsight on the models.
+
+```{r}
+pcaPreProcess.all <- preProcess(trainer.subSetTrain[, -clref], method = "pca", thresh = 0.99)
+trainer.subSetTrain.pca.all <- predict(pcaPreProcess.all, trainer.subSetTrain[, -clref])
+trainer.subSetTest.pca.all <- predict(pcaPreProcess.all, trainer.subSetTest[, -clref])
+tester.pca.all <- predict(pcaPreProcess.all, tester.cleaned[, -clref])
+pcaPreProcess.subset <- preProcess(trainer.subSetTrain[, -excludeColumns], method = "pca", thresh = 0.99)
+trainer.subSetTrain.pca.subset <- predict(pcaPreProcess.subset, trainer.subSetTrain[, -excludeColumns])
+trainer.subSetTest.pca.subset <- predict(pcaPreProcess.subset, trainer.subSetTest[, -excludeColumns])
+tester.pca.subset <- predict(pcaPreProcess.subset, tester.cleaned[, -clref])
+```
+
+Now we use the Random Forest trainer model with 200 trees
+
+```{r}
+library(randomForest)
+ntree <- 150  
+start <- proc.time()
+rfMod.cleaned <- randomForest(
+  x=trainer.subSetTrain[, -clref], 
+  y=trainer.subSetTrain$classe,
+  xtest=trainer.subSetTest[, -clref], 
+  ytest=trainer.subSetTest$classe, 
+  ntree=ntree,
+  keep.forest=TRUE,
+  proximity=TRUE) 
+proc.time() - start
+start <- proc.time()
+rfMod.exclude <- randomForest(
+  x=trainer.subSetTrain[, -excludeColumns], 
+  y=trainer.subSetTrain$classe,
+  xtest=trainer.subSetTest[, -excludeColumns], 
+  ytest=trainer.subSetTest$classe, 
+  ntree=ntree,
+  keep.forest=TRUE,
+  proximity=TRUE) 
+proc.time() - start
+start <- proc.time()
+rfMod.pca.all <- randomForest(
+  x=trainer.subSetTrain.pca.all, 
+  y=trainer.subSetTrain$classe,
+  xtest=trainer.subSetTest.pca.all, 
+  ytest=trainer.subSetTest$classe, 
+  ntree=ntree,
+  keep.forest=TRUE,
+  proximity=TRUE) 
+proc.time() - start
+start <- proc.time()
+rfMod.pca.subset <- randomForest(
+  x=trainer.subSetTrain.pca.subset, 
+  y=trainer.subSetTrain$classe,
+  xtest=trainer.subSetTest.pca.subset, 
+  ytest=trainer.subSetTest$classe, 
+  ntree=ntree,
+  keep.forest=TRUE,
+  proximity=TRUE) 
+proc.time() - start
+```
+
+#Model examination
+
+We will check the accuracies of each of the 4 models
+
+```{r}
+rfMod.cleaned
+rfMod.cleaned.trainer.accuracy <- round(1-sum(rfMod.cleaned$confusion[, 'class.error']),3)
+paste0("Accuracy trainer: ",rfMod.cleaned.trainer.accuracy)
+rfMod.cleaned.tester.accuracy <- round(1-sum(rfMod.cleaned$test$confusion[, 'class.error']),3)
+paste0("Accuracy tester: ",rfMod.cleaned.tester.accuracy)
+rfMod.exclude
+rfMod.exclude.trainer.accuracy <- round(1-sum(rfMod.exclude$confusion[, 'class.error']),3)
+paste0("Accuracy trainer: ",rfMod.exclude.trainer.accuracy)
+rfMod.exclude.tester.accuracy <- round(1-sum(rfMod.exclude$test$confusion[, 'class.error']),3)
+paste0("Accuracy tester: ",rfMod.exclude.tester.accuracy)
+rfMod.pca.all
+rfMod.pca.all.trainer.accuracy <- round(1-sum(rfMod.pca.all$confusion[, 'class.error']),3)
+paste0("Accuracy trainer: ",rfMod.pca.all.trainer.accuracy)
+rfMod.pca.all.tester.accuracy <- round(1-sum(rfMod.pca.all$test$confusion[, 'class.error']),3)
+paste0("Accuracy tester: ",rfMod.pca.all.tester.accuracy)
+rfMod.pca.subset
+rfMod.pca.subset.trainer.accuracy <- round(1-sum(rfMod.pca.subset$confusion[, 'class.error']),3)
+paste0("Accuracy trainer: ",rfMod.pca.subset.trainer.accuracy)
+rfMod.pca.subset.tester.accuracy <- round(1-sum(rfMod.pca.subset$test$confusion[, 'class.error']),3)
+paste0("Accuracy tester: ",rfMod.pca.subset.tester.accuracy)
+```
+
+#Conclusion
+
+The `rfMod.exclude` performs better then the 'rfMod.cleaned'
+
+We will thereofre choose the  `rfMod.exclude` model as the best model to use for predicting the test set as it has the higher accuracy and the lowest error rate
+
+
+We will now plot this model
+
+```{r}
+par(mfrow=c(1,2)) 
+varImpPlot(rfMod.exclude, cex=0.6, pch=20, main='Variable Importance: rfMod.exclude')
+plot(rfMod.exclude, cex=0.6, main='Error compared to number of trees')
+par(mfrow=c(1,1)) 
+```
+
+#Results
+
+We will run all four models for this final test
+
+```{r}
+predictions <- t(cbind(
+    exclude=as.data.frame(predict(rfMod.exclude, tester.cleaned[, -excludeColumns]), optional=TRUE),
+    cleaned=as.data.frame(predict(rfMod.cleaned, tester.cleaned), optional=TRUE),
+    pcaAll=as.data.frame(predict(rfMod.pca.all, tester.pca.all), optional=TRUE),
+    pcaExclude=as.data.frame(predict(rfMod.pca.subset, tester.pca.subset), optional=TRUE)
+))
+predictions
+```
+
+As we can see, there are not a lot of change between the results in these models. However, due to better accuracy, and mostly lower error rate, we will stick with the `rfMod.exclude` model
